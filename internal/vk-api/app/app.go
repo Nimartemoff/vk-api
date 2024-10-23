@@ -12,7 +12,7 @@ import (
 
 const (
 	userID   = 1
-	fileName = "durov.json"
+	fileName = "../durov.json"
 )
 
 func Run(cfg *config.Config) {
