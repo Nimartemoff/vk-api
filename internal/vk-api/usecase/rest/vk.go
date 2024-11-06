@@ -22,7 +22,12 @@ const (
 	usersGetMethodName         = "method/users.get"
 	getFollowersMethodName     = "method/users.getFollowers"
 	getSubscriptionsMethodName = "method/users.getSubscriptions"
-	apiVersion                 = "5.131"
+	apiVersion                 = "5.199"
+
+	usersGetFields         = "screen_name,sex,city"
+	getSubscriptionsFields = "name,screen_name"
+
+	count = 3
 
 	base = 10
 )
@@ -68,7 +73,10 @@ func (c *VKClient) GetUsers(ctx context.Context, ids ...uint64) ([]models.User, 
 		if err := rest.GetRestClient(func() (errGet error) {
 			req := c.resty.R().
 				SetContext(ctx).
-				SetQueryParam("v", apiVersion)
+				SetQueryParams(map[string]string{
+					"v":      apiVersion,
+					"fields": usersGetFields,
+				})
 
 			if userIDs != "" {
 				req.SetQueryParam("user_ids", userIDs)
@@ -108,8 +116,8 @@ func (c *VKClient) GetFollowers(ctx context.Context, id uint64) (followers []mod
 	var resp *resty.Response
 
 	type respParams struct {
-		Count       uint64   `json:"count"`
-		FollowerIDs []uint64 `json:"items"`
+		Count     uint64        `json:"count"`
+		Followers []models.User `json:"items"`
 	}
 	var response struct {
 		Params respParams `json:"response"`
@@ -127,6 +135,8 @@ func (c *VKClient) GetFollowers(ctx context.Context, id uint64) (followers []mod
 				SetQueryParams(map[string]string{
 					"v":       apiVersion,
 					"user_id": userID,
+					"count":   strconv.FormatUint(count, 10),
+					"fields":  usersGetFields,
 				})
 
 			resp, errGet = req.Get(urlr)
@@ -152,31 +162,30 @@ func (c *VKClient) GetFollowers(ctx context.Context, id uint64) (followers []mod
 			continue
 		}
 
-		followers = make([]models.User, 0, response.Params.Count)
-		for _, followerID := range response.Params.FollowerIDs {
-			followers = append(followers, models.User{ID: followerID})
-		}
-
-		return followers, nil
+		return response.Params.Followers, nil
 	}
 
 	return nil, err
 }
 
-func (c *VKClient) GetSubscriptions(ctx context.Context, id uint64) (subscription models.Subscription, err error) {
+func (c *VKClient) GetSubscriptions(ctx context.Context, id uint64) (subscriptions models.Subscriptions, err error) {
 	userID := strconv.FormatUint(id, 10)
 	var resp *resty.Response
 
-	type content struct {
-		Count uint64   `json:"count"`
-		Items []uint64 `json:"items"`
+	type userGroup struct {
+		ID         uint64      `json:"id"`
+		Type       string      `json:"type"`
+		Name       string      `json:"name"`
+		ScreenName string      `json:"screen_name"`
+		FirstName  string      `json:"first_name"`
+		LastName   string      `json:"last_name"`
+		Sex        byte        `json:"sex"`
+		City       models.City `json:"city"`
 	}
-
 	type respParams struct {
-		Users  content `json:"users"`
-		Groups content `json:"groups"`
+		Count         uint64      `json:"count"`
+		Subscriptions []userGroup `json:"items"`
 	}
-
 	var response struct {
 		Params respParams `json:"response"`
 	}
@@ -184,15 +193,17 @@ func (c *VKClient) GetSubscriptions(ctx context.Context, id uint64) (subscriptio
 	for _, baseURL := range c.baseURLs {
 		urlr, err := url.JoinPath(baseURL, getSubscriptionsMethodName)
 		if err != nil {
-			return subscription, err
+			return subscriptions, err
 		}
 
 		if err := rest.GetRestClient(func() (errGet error) {
 			req := c.resty.R().
 				SetContext(ctx).
 				SetQueryParams(map[string]string{
-					"v":       apiVersion,
-					"user_id": userID,
+					"v":        apiVersion,
+					"user_id":  userID,
+					"extended": "1",
+					"count":    strconv.FormatUint(count, 10),
 				})
 
 			resp, errGet = req.Get(urlr)
@@ -218,20 +229,31 @@ func (c *VKClient) GetSubscriptions(ctx context.Context, id uint64) (subscriptio
 			continue
 		}
 
-		subscription.Users = make([]models.User, 0, response.Params.Users.Count)
-		for _, user := range response.Params.Users.Items {
-			subscription.Users = append(subscription.Users, models.User{ID: user})
+		for _, userGroup := range response.Params.Subscriptions {
+			switch userGroup.Type {
+			case "profile":
+				subscriptions.Users = append(subscriptions.Users, models.User{
+					ID:         userGroup.ID,
+					ScreenName: userGroup.ScreenName,
+					FirstName:  userGroup.FirstName,
+					LastName:   userGroup.LastName,
+					Sex:        userGroup.Sex,
+					City:       userGroup.City,
+				})
+			case "page":
+				subscriptions.Groups = append(subscriptions.Groups, models.Group{
+					ID:         userGroup.ID,
+					Name:       userGroup.Name,
+					ScreenName: userGroup.ScreenName,
+				})
+			}
 		}
 
-		subscription.Groups = make([]models.Group, 0, response.Params.Groups.Count)
-		for _, user := range response.Params.Groups.Items {
-			subscription.Groups = append(subscription.Groups, models.Group{ID: user})
-		}
-
-		return subscription, nil
+		log.Info().Msgf("Обошел подписки: %+v", subscriptions)
+		return subscriptions, nil
 	}
 
-	return subscription, err
+	return subscriptions, err
 }
 
 func (c *VKClient) parseUserIDs(ids ...uint64) (string, error) {
