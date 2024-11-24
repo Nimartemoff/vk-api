@@ -38,6 +38,9 @@ func Run(cfg *config.Config) {
 	defer session.Close(ctx)
 
 	userUsecase := usecase.NewUserUsecase(c, neo4jRepo.NewUserNeo4jRepo(session))
+	if err := userUsecase.CreateIndexes(ctx); err != nil {
+		log.Error().Err(err).Send()
+	}
 
 	user, err := userUsecase.GetUsersWithDepth(userID, 3)
 	if err != nil {
