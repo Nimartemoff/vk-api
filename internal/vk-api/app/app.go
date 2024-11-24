@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	userID   = 161166919
-	fileName = "Романчук.json"
+	userID   = 183170347
+	fileName = "Копырин.json"
 )
 
 func Run(cfg *config.Config) {

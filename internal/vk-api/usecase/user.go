@@ -38,12 +38,16 @@ func (uc *UserUsecase) GetUser(userID uint64) (models.User, error) {
 		return models.User{}, fmt.Errorf("uc.client.GetUsers: user not found")
 	}
 
+	time.Sleep(time.Second)
+
 	followers, err := uc.client.GetFollowers(ctx, userID)
 	if err != nil {
 		return models.User{}, fmt.Errorf("uc.client.GetFollowers: %w", err)
 	}
 
 	user[0].Followers = followers
+
+	time.Sleep(time.Second)
 
 	subscriptions, err := uc.client.GetSubscriptions(ctx, userID)
 	if err != nil {
@@ -70,12 +74,14 @@ func (uc *UserUsecase) GetUsersWithDepth(userID uint64, depth int) (models.User,
 		if user.Followers[i], err = uc.GetUsersWithDepth(user.Followers[i].ID, depth-1); err != nil {
 			return models.User{}, fmt.Errorf("uc.GetUsersWithDepth: %w", err)
 		}
+		time.Sleep(time.Second)
 	}
 
 	for i := range user.Subscriptions.Users {
 		if user.Subscriptions.Users[i], err = uc.GetUsersWithDepth(user.Subscriptions.Users[i].ID, depth-1); err != nil {
 			return models.User{}, fmt.Errorf("uc.GetUsersWithDepth: %w", err)
 		}
+		time.Sleep(time.Second)
 	}
 
 	return user, nil
