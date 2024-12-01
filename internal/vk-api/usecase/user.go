@@ -128,12 +128,34 @@ func (uc *UserUsecase) SaveUser(ctx context.Context, user models.User) error {
 	}
 
 	for _, group := range user.Subscriptions.Groups {
+		if group.ID == 0 {
+			continue
+		}
+
 		if err := uc.neo4jRepo.CreateGroup(ctx, group); err != nil {
 			return err
 		}
 
 		log.Info().Msgf("Создание отношения (%s %s)->[:SUBSCRIBE]->(%s)", user.FirstName, user.LastName, group.Name)
 		if err := uc.neo4jRepo.CreateSubscribeUserGroupRelationship(ctx, user, group); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (uc *UserUsecase) SaveGroup(ctx context.Context, group models.GroupWithSubscribers) error {
+	if group.ID == 0 {
+		return nil
+	}
+
+	if err := uc.neo4jRepo.CreateGroup(ctx, group.Group); err != nil {
+		return err
+	}
+
+	for i := range group.Subscribers {
+		if err := uc.neo4jRepo.CreateSubscribeUserGroupRelationship(ctx, group.Subscribers[i], group.Group); err != nil {
 			return err
 		}
 	}
@@ -159,4 +181,16 @@ func (uc *UserUsecase) GetTopGroupsBySubscribersCount(ctx context.Context, limit
 
 func (uc *UserUsecase) GetUsersWithDifferentGroups(ctx context.Context, limit int) ([]models.User, error) {
 	return uc.neo4jRepo.GetUsersWithDifferentGroups(ctx, limit)
+}
+
+func (uc *UserUsecase) GetAllNodes(ctx context.Context) ([]models.Node, error) {
+	return uc.neo4jRepo.GetAllNodes(ctx)
+}
+
+func (uc *UserUsecase) GetNodeWithRelationships(ctx context.Context, id uint64) (interface{}, error) {
+	return uc.neo4jRepo.GetNodeWithRelationships(ctx, id)
+}
+
+func (uc *UserUsecase) DeleteNode(ctx context.Context, id uint64) error {
+	return uc.neo4jRepo.DeleteNode(ctx, id)
 }

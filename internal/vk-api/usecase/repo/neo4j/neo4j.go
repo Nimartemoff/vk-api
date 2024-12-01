@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+const (
+	srcTypeUnprocessed = 0
+	srcTypeUser        = 1
+	srcTypeGroup       = 2
+)
+
 type UserNeo4jRepo struct {
 	session neo4j.SessionWithContext
 }
@@ -97,6 +103,16 @@ func (r *UserNeo4jRepo) CreateSubscribeUserGroupRelationship(ctx context.Context
 			"groupId": group.ID,
 		},
 	)
+	return err
+}
+
+func (r *UserNeo4jRepo) DeleteNode(ctx context.Context, id uint64) error {
+	query := `
+		MATCH (n)
+		WHERE id(n) = $nodeId
+		DETACH DELETE n
+	`
+	_, err := r.session.Run(ctx, query, map[string]interface{}{"nodeId": id})
 	return err
 }
 
@@ -190,9 +206,9 @@ func (r *UserNeo4jRepo) GetTopUsersByFollowersCount(ctx context.Context, limit i
 func (r *UserNeo4jRepo) GetTopGroupsBySubscribersCount(ctx context.Context, limit int) ([]models.Group, error) {
 	query := `
 		MATCH (g:Group)<-[:Subscribe]-(u:User)
-			RETURN g.id AS group_id, g.name AS name, g.screen_name AS screen_name, COUNT(u) AS subscribersCount 
-			ORDER BY subscribersCount DESC
-			LIMIT $limit
+		RETURN g.id AS group_id, g.name AS name, g.screen_name AS screen_name, COUNT(u) AS subscribersCount 
+		ORDER BY subscribersCount DESC
+		LIMIT $limit
 	`
 	result, err := r.session.Run(ctx, query, map[string]interface{}{"limit": limit})
 	if err != nil {
@@ -218,7 +234,7 @@ func (r *UserNeo4jRepo) GetTopGroupsBySubscribersCount(ctx context.Context, limi
 
 func (r *UserNeo4jRepo) GetUsersWithDifferentGroups(ctx context.Context, limit int) ([]models.User, error) {
 	query := `
-		 MATCH (g:Group)<-[:Subscribe]-(u:User)
+		MATCH (g:Group)<-[:Subscribe]-(u:User)
 		WITH u
 		MATCH (g)<-[:Subscribe]-(other:User)
 		WHERE u <> other
@@ -261,4 +277,200 @@ func (r *UserNeo4jRepo) GetUsersWithDifferentGroups(ctx context.Context, limit i
 	}
 
 	return users, nil
+}
+
+func (r *UserNeo4jRepo) GetAllNodes(ctx context.Context) ([]models.Node, error) {
+	query := `
+		MATCH (n)
+		RETURN id(n) AS id, labels(n) AS labels
+	`
+	result, err := r.session.Run(ctx, query, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var nodes []models.Node
+	for result.Next(ctx) {
+		record := result.Record()
+		nodeID, _ := record.Get("id")
+		nodeLabels, _ := record.Get("labels")
+
+		var labels []string
+		for _, label := range nodeLabels.([]interface{}) {
+			labels = append(labels, label.(string))
+		}
+
+		nodes = append(nodes, models.Node{
+			ID:     nodeID.(int64),
+			Labels: labels,
+		})
+	}
+
+	if err = result.Err(); err != nil {
+		return nil, err
+	}
+
+	return nodes, nil
+}
+
+func (r *UserNeo4jRepo) GetNodeWithRelationships(ctx context.Context, id uint64) (interface{}, error) {
+	query := `
+		OPTIONAL MATCH (n)-[r]->(m) WHERE id(n) = $nodeID 
+		WITH n, r, m 
+		WHERE n IS NOT NULL  
+		RETURN n, r, m, null as r2 
+		UNION
+		OPTIONAL MATCH (n)<-[r2]-(m) WHERE id(n) = $nodeID 
+		WITH n, r2, m 
+		WHERE n IS NOT NULL  
+		RETURN n, null as r, m, r2 
+	`
+	result, err := r.session.Run(ctx, query, map[string]interface{}{"nodeID": id})
+	if err != nil {
+		return nil, err
+	}
+
+	var srcType byte // 0 - источник не обработан 1 - юзер 2 - группа.
+	var group models.GroupWithSubscribers
+	var user models.User
+
+	for result.Next(ctx) {
+		record := result.Record()
+
+		node, _ := record.Get("n")
+		n, ok := node.(neo4j.Node)
+		if !ok {
+			return nil, fmt.Errorf("cant assert node %+v (type %T) to neo4j.Node", node, node)
+		}
+
+		if len(n.Labels) == 0 {
+			return nil, fmt.Errorf("can not find labels for node %+v", node)
+		}
+
+		if srcType == srcTypeUnprocessed {
+			switch n.Labels[0] {
+			case "User":
+				user = processUserNode(n)
+				srcType = srcTypeUser
+			case "Group":
+				group = processGroupWithSubscribersNode(n)
+				srcType = srcTypeGroup
+			}
+		}
+
+		connectedNode, _ := record.Get("m")
+		m, ok := connectedNode.(neo4j.Node)
+		if !ok {
+			return nil, fmt.Errorf("cant assert node %+v (type %T) to neo4j.Node", connectedNode, connectedNode)
+		}
+
+		switch srcType {
+		case srcTypeUser:
+			relationship, _ := record.Get("r")
+			r, ok := relationship.(neo4j.Relationship)
+			if ok {
+				processUserRelation(&user, m, r)
+			}
+
+			relationship, _ = record.Get("r2")
+			r2, ok := relationship.(neo4j.Relationship)
+			if ok {
+				processUserRelation(&user, m, r2)
+			}
+		case srcTypeGroup:
+			group.Subscribers = append(group.Subscribers, processUserNode(m))
+		}
+	}
+
+	switch srcType {
+	case srcTypeUser:
+		return user, result.Err()
+	case srcTypeGroup:
+		return group, result.Err()
+	}
+
+	return nil, nil
+}
+
+func processUserRelation(user *models.User, m neo4j.Node, r neo4j.Relationship) {
+	switch r.Type {
+	case "Follow":
+		user.Followers = append(user.Followers, processUserNode(m))
+	case "Subscribe":
+		switch m.Labels[0] {
+		case "Group":
+			user.Subscriptions.Groups = append(user.Subscriptions.Groups, processGroupNode(m))
+		case "User":
+			user.Subscriptions.Users = append(user.Subscriptions.Users, processUserNode(m))
+		}
+	}
+}
+
+func processUserNode(n neo4j.Node) models.User {
+	var user models.User
+	props := n.Props
+
+	if id, ok := props["id"].(int64); ok {
+		user.ID = uint64(id)
+	}
+	if screenName, ok := props["screen_name"].(string); ok {
+		user.ScreenName = screenName
+	}
+	if sex, ok := props["sex"].(int64); ok {
+		user.Sex = byte(sex)
+	}
+	if city, ok := props["city"].(string); ok {
+		user.City = models.City{Title: city}
+	}
+	if name, ok := props["name"].(string); ok {
+		user.FirstName, user.LastName = splitFullName(name)
+	}
+
+	return user
+}
+
+func processGroupNode(n neo4j.Node) models.Group {
+	var group models.Group
+	props := n.Props
+
+	if id, ok := props["id"].(int64); ok {
+		group.ID = uint64(id)
+	}
+	if name, ok := props["name"].(string); ok {
+		group.Name = name
+	}
+	if screenName, ok := props["screen_name"].(string); ok {
+		group.ScreenName = screenName
+	}
+
+	return group
+}
+
+func processGroupWithSubscribersNode(n neo4j.Node) models.GroupWithSubscribers {
+	var group models.GroupWithSubscribers
+	props := n.Props
+
+	if id, ok := props["id"].(int64); ok {
+		group.ID = uint64(id)
+	}
+	if name, ok := props["name"].(string); ok {
+		group.Name = name
+	}
+	if screenName, ok := props["screen_name"].(string); ok {
+		group.ScreenName = screenName
+	}
+
+	return group
+}
+
+func splitFullName(fullName string) (string, string) {
+	nameParts := strings.Fields(fullName)
+	var firstName, lastName string
+	if len(nameParts) > 0 {
+		firstName = nameParts[0]
+	}
+	if len(nameParts) > 1 {
+		lastName = strings.Join(nameParts[1:], " ")
+	}
+	return firstName, lastName
 }
